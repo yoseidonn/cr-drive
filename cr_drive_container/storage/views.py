@@ -121,6 +121,17 @@ class DriveView(LoginRequiredMixin, View):
         context['pending_access_file_ids'] = set(AccessRequest.objects.filter(user=user, file__in=files, status='pending').values_list('file_id', flat=True))
         # Optionally, for folders:
         context['pending_access_folder_ids'] = set(AccessRequest.objects.filter(user=user, folder__in=folders, status='pending').values_list('folder_id', flat=True))
+        # Add count of pending requests for owner's files/folders
+        pending_count = 0
+        if user.is_authenticated:
+            pending_count = AccessRequest.objects.filter(
+                status='pending',
+                file__owner=user
+            ).count() + AccessRequest.objects.filter(
+                status='pending',
+                folder__owner=user
+            ).count()
+        context['pending_access_request_count'] = pending_count
         return render(request, self.template_name, context)
 
     def post(self, request):
@@ -490,6 +501,29 @@ class RejectAccessRequestView(LoginRequiredMixin, View):
 class ShareLinkFileView(View):
     def get(self, request, token):
         file = get_object_or_404(File, share_token=token)
+        if file.visibility == 'private':
+            banner = "This file is private. To share, set its visibility to 'ask' or 'public'."
+            return render(request, 'storage/drive.html', {
+                'folders': [],
+                'files': [],
+                'current_folder': None,
+                'breadcrumbs': [],
+                'view_mode': 'list',
+                'file_form': FileUploadForm(),
+                'folder_form': FolderCreateForm(),
+                'rename_form': RenameForm(),
+                'move_form': None,
+                'show_upload_modal': False,
+                'show_folder_modal': False,
+                'show_rename_modal': False,
+                'show_move_modal': False,
+                'show_remove_modal': False,
+                'rename_target': None,
+                'move_target': None,
+                'remove_target': None,
+                'shared_file': None,
+                'share_banner': banner,
+            })
         user = request.user if request.user.is_authenticated else None
         is_owner = user and (file.owner == user or user.is_superuser)
         is_shared = user and Permission.objects.filter(file=file, user=user).exists()
@@ -584,12 +618,34 @@ class ShareLinkFileView(View):
 class ShareLinkFolderView(View):
     def get(self, request, token):
         folder = get_object_or_404(Folder, share_token=token)
+        if folder.visibility == 'private':
+            banner = "This folder is private. To share, set its visibility to 'ask' or 'public'."
+            return render(request, 'storage/drive.html', {
+                'folders': [],
+                'files': [],
+                'current_folder': None,
+                'breadcrumbs': [],
+                'view_mode': 'list',
+                'file_form': FileUploadForm(),
+                'folder_form': FolderCreateForm(),
+                'rename_form': RenameForm(),
+                'move_form': None,
+                'show_upload_modal': False,
+                'show_folder_modal': False,
+                'show_rename_modal': False,
+                'show_move_modal': False,
+                'show_remove_modal': False,
+                'rename_target': None,
+                'move_target': None,
+                'remove_target': None,
+                'share_banner': banner,
+            })
         user = request.user if request.user.is_authenticated else None
         is_owner = user and (folder.owner == user or user.is_superuser)
         is_shared = user and Permission.objects.filter(folder=folder, user=user).exists()
         if folder.visibility == 'public' or is_owner or is_shared:
-            files = folder.files.filter(visibility__in=['public', 'ask'])
-            subfolders = folder.subfolders.filter(visibility__in=['public', 'ask'])
+            files = folder.files.all() if (is_owner or is_shared) else folder.files.filter(visibility='public')
+            subfolders = folder.subfolders.all() if (is_owner or is_shared) else folder.subfolders.filter(visibility='public')
             return render(request, 'storage/drive.html', {
                 'folders': subfolders,
                 'files': files,
@@ -612,18 +668,50 @@ class ShareLinkFolderView(View):
         elif folder.visibility == 'ask':
             return render(request, 'storage/share_file.html', {'folder': folder, 'show_request_access': True})
         else:
-            raise Http404()
+            # Private: block all access, even to inner public/ask files
+            banner = "This folder is not public. "
+            if not user:
+                banner += "<a href='/accounts/login/'>Log in</a> to see if you have access."
+            else:
+                banner += "You do not have access to this folder."
+            return render(request, 'storage/drive.html', {
+                'folders': [],
+                'files': [],
+                'current_folder': None,
+                'breadcrumbs': [],
+                'view_mode': 'list',
+                'file_form': FileUploadForm(),
+                'folder_form': FolderCreateForm(),
+                'rename_form': RenameForm(),
+                'move_form': None,
+                'show_upload_modal': False,
+                'show_folder_modal': False,
+                'show_rename_modal': False,
+                'show_move_modal': False,
+                'show_remove_modal': False,
+                'rename_target': None,
+                'move_target': None,
+                'remove_target': None,
+                'share_banner': banner,
+            })
 
 # --- AJAX endpoints for sharing modal ---
 class ShareInfoView(LoginRequiredMixin, View):
     def get(self, request, type, id):
         user = request.user
+        # If owner requests a share link for a private item, auto-switch to 'ask' mode for secure sharing
         if type == 'file':
             obj = get_object_or_404(File, id=id)
+            if obj.visibility == 'private' and (obj.owner == user or user.is_superuser):
+                obj.visibility = 'ask'
+                obj.save()
             share_link = request.build_absolute_uri(reverse('share_link_file', args=[obj.share_token]))
             shared_users = list(Permission.objects.filter(file=obj).values('user__username', 'access_level'))
         else:
             obj = get_object_or_404(Folder, id=id)
+            if obj.visibility == 'private' and (obj.owner == user or user.is_superuser):
+                obj.visibility = 'ask'
+                obj.save()
             share_link = request.build_absolute_uri(reverse('share_link_folder', args=[obj.share_token]))
             shared_users = list(Permission.objects.filter(folder=obj).values('user__username', 'access_level'))
         is_owner = obj.owner == user or user.is_superuser

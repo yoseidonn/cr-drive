@@ -184,6 +184,19 @@ document.addEventListener('DOMContentLoaded', function() {
     removeModal.show();
     contextMenu.style.display = 'none';
   };
+  document.getElementById('shareBtn').onclick = function() {
+    if (currentTargetType && currentTargetId) {
+      // Find the name for the modal (from DOM)
+      let name = '';
+      let item = document.querySelector('.explorer-item[data-type="' + currentTargetType + '"][data-id="' + currentTargetId + '"]');
+      if (item) {
+        let nameElem = item.querySelector('.card-body .mt-2') || item.querySelector('a.flex-grow-1') || item.querySelector('.mt-2.small');
+        if (nameElem) name = nameElem.textContent.trim();
+      }
+      openShareModal(currentTargetType, currentTargetId, name);
+    }
+    contextMenu.style.display = 'none';
+  };
 
   // Drag-and-drop move logic (basic visual feedback)
   let draggedItem = null;

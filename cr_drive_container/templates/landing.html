@@ -1,9 +1,61 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="container text-center mt-5">
-  <h1>Welcome to CR Drive</h1>
-  <p class="lead">Secure Cloud Storage for Everyone</p>
-  <a href="{% url 'signup' %}" class="btn btn-primary m-2">Sign Up</a>
-  <a href="{% url 'login' %}" class="btn btn-outline-primary m-2">Log In</a>
+<div class="container py-5">
+  <!-- Hero Section -->
+  <div class="row align-items-center mb-5">
+    <div class="col-md-6 text-center text-md-start">
+      <h1 class="display-4 fw-bold mb-3">Welcome to <span class="text-primary">CR Drive</span></h1>
+      <p class="lead mb-4">Your secure, modern, and private cloud storage. Store, share, and access your files anywhere, anytime.</p>
+      <a href="{% url 'signup' %}" class="btn btn-primary btn-lg me-2 shadow">Get Started Free</a>
+      <a href="{% url 'login' %}" class="btn btn-outline-primary btn-lg shadow">Log In</a>
+    </div>
+    <div class="col-md-6 text-center d-none d-md-block">
+      <img src="https://cdn.jsdelivr.net/gh/feathericons/feather/icons/cloud.svg" alt="Cloud Storage" style="width: 60%; max-width: 350px; filter: drop-shadow(0 0 2rem #0d6efd33);">
+    </div>
+  </div>
+
+  <!-- Features Section -->
+  <div class="row g-4 mb-5">
+    <div class="col-md-4">
+      <div class="card h-100 shadow border-0">
+        <div class="card-body text-center">
+          <div class="mb-3">
+            <i class="bi bi-shield-lock text-primary" style="font-size:2.5rem;"></i>
+          </div>
+          <h5 class="card-title fw-bold">End-to-End Encryption</h5>
+          <p class="card-text">Your files are encrypted before they leave your device. Only you can access your data—privacy by design.</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card h-100 shadow border-0">
+        <div class="card-body text-center">
+          <div class="mb-3">
+            <i class="bi bi-cloud-arrow-up text-success" style="font-size:2.5rem;"></i>
+          </div>
+          <h5 class="card-title fw-bold">Easy File Management</h5>
+          <p class="card-text">Upload, organize, and share files and folders with a beautiful, intuitive interface—on any device.</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card h-100 shadow border-0">
+        <div class="card-body text-center">
+          <div class="mb-3">
+            <i class="bi bi-people text-info" style="font-size:2.5rem;"></i>
+          </div>
+          <h5 class="card-title fw-bold">Collaboration & Sharing</h5>
+          <p class="card-text">Share files securely, manage permissions, and collaborate with friends or your team in real time.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Call to Action Banner -->
+  <div class="p-5 rounded-4 text-center bg-gradient" style="background: linear-gradient(90deg, #0d6efd 0%, #6f42c1 100%); color: #fff;">
+    <h2 class="fw-bold mb-3">Ready to take control of your files?</h2>
+    <p class="lead mb-4">Sign up now and get started with your free, secure cloud drive.</p>
+    <a href="{% url 'signup' %}" class="btn btn-light btn-lg fw-bold shadow">Create Your Free Account</a>
+  </div>
 </div>
 {% endblock %} 

@@ -118,7 +118,8 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Storage quota
-TOTAL_SERVER_STORAGE = int(os.getenv('TOTAL_SERVER_STORAGE', 5242880))  # Default 5GB
+TOTAL_SERVER_STORAGE = int(os.getenv('TOTAL_SERVER_STORAGE', 5368709120))  # Default 5GB
+USER_STORAGE_QUOTA = TOTAL_SERVER_STORAGE * 0.02
 
 # File encryption key
 FILE_ENCRYPTION_KEY = os.getenv('FILE_ENCRYPTION_KEY')

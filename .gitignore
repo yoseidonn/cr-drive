@@ -8,6 +8,7 @@ env/
 *.log.*.*.*
 *.log.*.*.*.*
 *.log.*.*.*.*.*
+media/
 
 # Python
 *.pyc

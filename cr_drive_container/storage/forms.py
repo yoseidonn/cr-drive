@@ -4,9 +4,10 @@ from .models import File, Folder
 class FileUploadForm(forms.ModelForm):
     class Meta:
         model = File
-        fields = ['file']
+        fields = ['file', 'visibility']
         widgets = {
             'file': forms.ClearableFileInput(attrs={'class': 'form-control', 'accept': '*/*'}),
+            'visibility': forms.Select(attrs={'class': 'form-select'}),
         }
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -15,7 +16,10 @@ class FileUploadForm(forms.ModelForm):
 class FolderCreateForm(forms.ModelForm):
     class Meta:
         model = Folder
-        fields = ['name']
+        fields = ['name', 'visibility']
+        widgets = {
+            'visibility': forms.Select(attrs={'class': 'form-select'}),
+        }
 
 class RenameForm(forms.Form):
     name = forms.CharField(max_length=255)

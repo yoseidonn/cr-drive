@@ -2,19 +2,30 @@
 {% load static %}
 {% block content %}
 <div class="container py-4">
+  {% if share_banner %}
+    <div class="alert alert-info text-center mb-4">{{ share_banner|safe }}</div>
+  {% endif %}
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap">
     <nav aria-label="breadcrumb">
       <ol class="breadcrumb mb-0">
         <li class="breadcrumb-item"><a href="{% url 'drive' %}"><i class="bi bi-house-door"></i> My Drive</a></li>
-        {% for crumb in breadcrumbs %}
-        <li class="breadcrumb-item {% if forloop.last %}active{% endif %}" {% if forloop.last %}aria-current="page"{% endif %}>
-            {% if not forloop.last %}
-            <a href="{% url 'drive' %}?folder={{ crumb.id }}">{{ crumb.name }}</a>
-            {% else %}
-              {{ crumb.name }}
-            {% endif %}
-          </li>
-        {% endfor %}
+        {% if shared_file and not shared_file.owner == user %}
+          {% if breadcrumbs %}
+            {% with last_crumb=breadcrumbs|last %}
+              <li class="breadcrumb-item active" aria-current="page">{{ last_crumb.name }}</li>
+            {% endwith %}
+          {% endif %}
+        {% else %}
+          {% for crumb in breadcrumbs %}
+          <li class="breadcrumb-item {% if forloop.last %}active{% endif %}" {% if forloop.last %}aria-current="page"{% endif %}>
+              {% if not forloop.last %}
+              <a href="{% url 'drive' %}?folder={{ crumb.id }}">{{ crumb.name }}</a>
+              {% else %}
+                {{ crumb.name }}
+              {% endif %}
+            </li>
+          {% endfor %}
+        {% endif %}
       </ol>
     </nav>
     <div class="d-flex align-items-center gap-2">
@@ -22,6 +33,13 @@
       <button class="btn btn-outline-primary d-none d-md-inline" data-bs-toggle="modal" data-bs-target="#folderModal"><i class="bi bi-folder-plus"></i> New Folder</button>
       <a href="?{% if current_folder %}folder={{ current_folder.id }}&{% endif %}view=list" class="btn btn-outline-secondary btn-sm {% if view_mode == 'list' %}active{% endif %}"><i class="bi bi-list"></i></a>
       <a href="?{% if current_folder %}folder={{ current_folder.id }}&{% endif %}view=icon" class="btn btn-outline-secondary btn-sm {% if view_mode == 'icon' %}active{% endif %}"><i class="bi bi-grid-3x3-gap"></i></a>
+      {% if pending_access_request_count and pending_access_request_count > 0 %}
+        <a href="{% url 'owner_access_requests' %}" class="btn btn-warning position-relative ms-2">
+          <i class="bi bi-bell"></i>
+          <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">{{ pending_access_request_count }}</span>
+          Pending Requests
+        </a>
+      {% endif %}
     </div>
   </div>
   
@@ -50,8 +68,8 @@
                 <div class="mt-2 small">{{ file.name }}</div>
                 <div class="mt-1">
                   <a href="{% url 'download_file' file.id %}" class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i></a>
-                  <a href="{% url 'delete_file' file.id %}" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></a>
-                  <a href="{% url 'share_file' file.id %}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-share"></i></a>
+                  <button type="button" class="btn btn-sm btn-outline-danger" onclick="triggerRemoveModal({{ file.id }}, 'file')"><i class="bi bi-trash"></i></button>
+                  <a href="#" class="btn btn-sm btn-outline-secondary" onclick="openShareModal('file', {{ file.id }}, '{{ file.name|escapejs }}')"><i class="bi bi-share"></i></a>
                 </div>
               </div>
             </div>
@@ -65,6 +83,15 @@
       <li class="list-group-item d-flex align-items-center explorer-item" data-type="folder" data-id="{{ folder.id }}">
           <i class="bi bi-folder-fill me-2 text-warning"></i>
           <a href="{% url 'drive' %}?folder={{ folder.id }}" class="flex-grow-1 text-decoration-none text-dark">{{ folder.name }}</a>
+          <span class="ms-2">
+            {% if folder.visibility == 'public' %}
+              <span class="badge bg-success">Public</span>
+            {% elif folder.visibility == 'ask' %}
+              <span class="badge bg-warning text-dark">Ask</span>
+            {% else %}
+              <span class="badge bg-secondary">Private</span>
+            {% endif %}
+          </span>
         </li>
         {% endfor %}
       {% for file in files %}
@@ -72,11 +99,28 @@
           <div>
             <i class="bi bi-file-earmark-fill me-2 text-secondary"></i>
             {{ file.name }} <span class="text-muted small file-size" data-size="{{ file.size }}">({{ file.size }} bytes)</span>
+            <span class="ms-2">
+              {% if file.visibility == 'public' %}
+                <span class="badge bg-success">Public</span>
+              {% elif file.visibility == 'ask' %}
+                <span class="badge bg-warning text-dark">Ask</span>
+              {% else %}
+                <span class="badge bg-secondary">Private</span>
+              {% endif %}
+            </span>
+            {% if file.visibility == 'ask' and not file.owner == user and not file.id in can_share_file_ids %}
+              <form method="post" action="{% url 'request_access_file' file.id %}" style="display:inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-sm btn-outline-warning ms-2">Request Access</button>
+              </form>
+            {% elif file.visibility == 'ask' and file.id in pending_access_file_ids %}
+              <span class="badge bg-warning text-dark ms-2">Access Requested</span>
+            {% endif %}
           </div>
           <div>
             <a href="{% url 'download_file' file.id %}" class="btn btn-sm btn-outline-primary"><i class="bi bi-download"></i></a>
-            <a href="{% url 'delete_file' file.id %}" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></a>
-            <a href="{% url 'share_file' file.id %}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-share"></i></a>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="triggerRemoveModal({{ file.id }}, 'file')"><i class="bi bi-trash"></i></button>
+            <a href="#" class="btn btn-sm btn-outline-secondary" onclick="openShareModal('file', {{ file.id }}, '{{ file.name|escapejs }}')"><i class="bi bi-share"></i></a>
           </div>
         </li>
         {% endfor %}
@@ -112,9 +156,13 @@
             <div id="dropArea" class="border border-2 border-dashed rounded p-3 mb-3 text-center bg-light" style="cursor:pointer;">
               <i class="bi bi-cloud-arrow-up" style="font-size:2rem;"></i>
               <div class="mt-2">Drag & drop files here or click to select</div>
-              <input type="file" id="fileInput" name="encrypted_file" class="form-control d-none" multiple>
+              <input type="file" id="fileInput" name="file" class="form-control d-none" multiple>
             </div>
             <div id="selectedFilesList" class="mb-3"></div>
+            <div class="mb-3">
+              {{ file_form.visibility.label_tag }}
+              {{ file_form.visibility }}
+            </div>
             <div class="progress mb-2 d-none" id="uploadProgressBar">
               <div class="progress-bar" role="progressbar" style="width: 0%"></div>
             </div>
@@ -169,7 +217,12 @@
                 </ul>
               </div>
               {% endif %}
-            {{ folder_form.as_p }}
+            {{ folder_form.name.label_tag }}
+            {{ folder_form.name }}
+            <div class="mb-3">
+              {{ folder_form.visibility.label_tag }}
+              {{ folder_form.visibility }}
+            </div>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -263,6 +316,56 @@
       </div>
     </div>
   </div>
+
+  <!-- Share Modal -->
+  <div class="modal fade" id="shareModal" tabindex="-1" aria-labelledby="shareModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="shareModalLabel"><i class="bi bi-share"></i> Share <span id="shareModalItemName"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Share Link</label>
+            <div class="input-group">
+              <input type="text" class="form-control" id="shareLinkInput" readonly>
+              <button class="btn btn-outline-secondary" type="button" id="copyShareLinkBtn"><i class="bi bi-clipboard"></i></button>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Visibility</label>
+            <select class="form-select" id="shareVisibilitySelect" disabled>
+              <option value="public">Public</option>
+              <option value="ask">Ask</option>
+              <option value="private">Private</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Shared With</label>
+            <ul class="list-group" id="sharedUsersList">
+              <!-- Populated by JS -->
+            </ul>
+          </div>
+          <form id="addShareUserForm" autocomplete="off">
+            <div class="mb-3">
+              <label for="shareUsernameInput" class="form-label">Add User</label>
+              <input type="text" class="form-control" id="shareUsernameInput" placeholder="Username">
+            </div>
+            <div class="mb-3">
+              <label for="shareAccessLevelSelect" class="form-label">Access Level</label>
+              <select class="form-select" id="shareAccessLevelSelect">
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Share</button>
+          </form>
+          <div id="shareModalFeedback" class="mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 {% block extra_js %}
@@ -282,4 +385,33 @@
   #dropArea.bg-info { background: #e7f1fa !important; border-color: #0dcaf0 !important; }
 </style>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+<script>
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(function() {
+    btn.innerHTML = '<i class="bi bi-check-lg"></i> Copied!';
+    setTimeout(function() {
+      btn.innerHTML = '<i class="bi bi-link-45deg"></i> Share Link';
+    }, 1500);
+  });
+}
+
+function openShareModal(type, id, name) {
+  document.getElementById('shareModalItemName').textContent = name;
+  // Placeholder: populate share link, visibility, users, etc. via AJAX
+  // Example:
+  // document.getElementById('shareLinkInput').value = ...;
+  // document.getElementById('shareVisibilitySelect').value = ...;
+  // document.getElementById('shareVisibilitySelect').disabled = false; // if owner
+  // ...
+  var shareModal = new bootstrap.Modal(document.getElementById('shareModal'));
+  shareModal.show();
+}
+
+document.getElementById('copyShareLinkBtn').onclick = function() {
+  var input = document.getElementById('shareLinkInput');
+  input.select();
+  input.setSelectionRange(0, 99999);
+  navigator.clipboard.writeText(input.value);
+};
+</script>
 {% endblock %} 

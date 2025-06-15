@@ -1,8 +1,10 @@
+from django.views import View
+from django.views.generic import TemplateView
 from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth.decorators import login_required, user_passes_test
-from django.http import HttpResponse, Http404, FileResponse
+from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.http import HttpResponse, Http404, JsonResponse
 from django.contrib import messages
-from .models import File, Folder
+from .models import File, Folder, AccessRequest
 from .forms import FileUploadForm, FolderCreateForm, RenameForm, MoveForm
 from sharing.models import Permission
 from django.contrib.auth.models import User
@@ -11,10 +13,14 @@ import os
 from .encryption import encrypt_file, decrypt_file
 import mimetypes
 import re
+from django.core.files.base import File as DjangoFile
+import logging
+from django.db import models
+from django.urls import reverse
+from django.views.decorators.http import require_POST
+from django.utils.decorators import method_decorator
 
-# Helper: check if user is superuser
-def is_superuser(user):
-    return user.is_superuser
+logger = logging.getLogger(__name__)
 
 # Helper: get user storage usage
 def get_user_storage_usage(user):
@@ -27,85 +33,175 @@ def get_breadcrumbs(folder):
         folder = folder.parent
     return breadcrumbs
 
-@login_required
-def drive_view(request):
-    folder_id = request.GET.get('folder')
-    view_mode = request.GET.get('view', 'list')
-    folder = None
-    if folder_id:
-        folder = get_object_or_404(Folder, id=folder_id)
-        if folder.owner != request.user and not Permission.objects.filter(folder=folder, user=request.user).exists():
-            raise Http404()
-        folders = folder.subfolders.all()
-        files = folder.files.all()
-        breadcrumbs = get_breadcrumbs(folder)
-    else:
-        folders = Folder.objects.filter(owner=request.user, parent=None)
-        files = File.objects.filter(owner=request.user, folder__isnull=True)
-        breadcrumbs = []
+class IsSuperuserMixin(UserPassesTestMixin):
+    def test_func(self):
+        return self.request.user.is_superuser
 
-    # Handle forms in modals
-    file_form = FileUploadForm()
-    folder_form = FolderCreateForm()
-    rename_form = RenameForm()
-    move_form = MoveForm(user=request.user)
-    show_upload_modal = False
-    show_folder_modal = False
-    show_rename_modal = False
-    show_move_modal = False
-    show_remove_modal = False
-    rename_target = None
-    move_target = None
-    remove_target = None
+class DriveView(LoginRequiredMixin, View):
+    template_name = 'storage/drive.html'
 
-    if request.method == 'POST':
+    def get(self, request):
+        folder_id = request.GET.get('folder')
+        view_mode = request.GET.get('view', 'list')
+        folder = None
+        user = request.user
+        # Robust folder_id validation
+        try:
+            folder_id_int = int(folder_id)
+            if folder_id_int > 0:
+                folder = get_object_or_404(Folder, id=folder_id_int)
+            else:
+                folder = None
+        except (TypeError, ValueError):
+            folder = None
+        if folder:
+            # Check folder visibility
+            is_owner = folder.owner == user or user.is_superuser
+            is_shared = Permission.objects.filter(folder=folder, user=user).exists()
+            if not (is_owner or is_shared or folder.visibility in ['public', 'ask']):
+                raise Http404()
+            # Subfolders
+            shared_folder_ids = Permission.objects.filter(user=user, folder__in=folder.subfolders.all()).values_list('folder_id', flat=True)
+            folders = folder.subfolders.filter(
+                models.Q(owner=user) |
+                models.Q(visibility='public') |
+                models.Q(visibility='ask') |
+                models.Q(id__in=shared_folder_ids)
+            ).distinct()
+            # Files
+            shared_file_ids = Permission.objects.filter(user=user, file__in=folder.files.all()).values_list('file_id', flat=True)
+            files = folder.files.filter(
+                models.Q(owner=user) |
+                models.Q(visibility='public') |
+                models.Q(visibility='ask') |
+                models.Q(id__in=shared_file_ids)
+            ).distinct()
+            breadcrumbs = get_breadcrumbs(folder)
+        else:
+            root_folders = Folder.objects.filter(parent=None)
+            shared_folder_ids = Permission.objects.filter(user=user, folder__in=root_folders).values_list('folder_id', flat=True)
+            folders = root_folders.filter(
+                models.Q(owner=user) |
+                models.Q(visibility='public') |
+                models.Q(visibility='ask') |
+                models.Q(id__in=shared_folder_ids)
+            ).distinct()
+            root_files = File.objects.filter(folder__isnull=True)
+            shared_file_ids = Permission.objects.filter(user=user, file__in=root_files).values_list('file_id', flat=True)
+            files = root_files.filter(
+                models.Q(owner=user) |
+                models.Q(visibility='public') |
+                models.Q(visibility='ask') |
+                models.Q(id__in=shared_file_ids)
+            ).distinct()
+            breadcrumbs = []
+        context = {
+            'folders': folders,
+            'files': files,
+            'current_folder': folder,
+            'breadcrumbs': breadcrumbs,
+            'view_mode': view_mode,
+            'file_form': FileUploadForm(),
+            'folder_form': FolderCreateForm(),
+            'rename_form': RenameForm(),
+            'move_form': MoveForm(user=user),
+            'show_upload_modal': False,
+            'show_folder_modal': False,
+            'show_rename_modal': False,
+            'show_move_modal': False,
+            'show_remove_modal': False,
+            'rename_target': None,
+            'move_target': None,
+            'remove_target': None,
+        }
+        # Add sets of folder/file IDs the user can share
+        context['can_share_folder_ids'] = set(Permission.objects.filter(user=user, folder__in=folders).values_list('folder_id', flat=True))
+        context['can_share_file_ids'] = set(Permission.objects.filter(user=user, file__in=files).values_list('file_id', flat=True))
+        # Add set of file IDs with pending access requests
+        context['pending_access_file_ids'] = set(AccessRequest.objects.filter(user=user, file__in=files, status='pending').values_list('file_id', flat=True))
+        # Optionally, for folders:
+        context['pending_access_folder_ids'] = set(AccessRequest.objects.filter(user=user, folder__in=folders, status='pending').values_list('folder_id', flat=True))
+        return render(request, self.template_name, context)
+
+    def post(self, request):
+        folder_id = request.GET.get('folder')
+        folder = None
+        # Robust folder_id validation
+        try:
+            folder_id_int = int(folder_id)
+            if folder_id_int > 0:
+                folder = get_object_or_404(Folder, id=folder_id_int)
+            else:
+                folder = None
+        except (TypeError, ValueError):
+            folder = None
+        view_mode = request.GET.get('view', 'list')
+        # Rebuild context for error display
+        folders = folder.subfolders.all() if folder else Folder.objects.filter(owner=request.user, parent=None)
+        files = folder.files.all() if folder else File.objects.filter(owner=request.user, folder__isnull=True)
+        breadcrumbs = get_breadcrumbs(folder) if folder else []
+        context = {
+            'folders': folders,
+            'files': files,
+            'current_folder': folder,
+            'breadcrumbs': breadcrumbs,
+            'view_mode': view_mode,
+            'file_form': FileUploadForm(),
+            'folder_form': FolderCreateForm(),
+            'rename_form': RenameForm(),
+            'move_form': MoveForm(user=request.user),
+            'show_upload_modal': False,
+            'show_folder_modal': False,
+            'show_rename_modal': False,
+            'show_move_modal': False,
+            'show_remove_modal': False,
+            'rename_target': None,
+            'move_target': None,
+            'remove_target': None,
+        }
         if 'upload_file' in request.POST:
             file_form = FileUploadForm(request.POST, request.FILES)
             if file_form.is_valid():
                 upload = request.FILES['file']
                 if upload.size > settings.MAX_FILE_SIZE:
-                    messages.error(request, f'File size exceeds the limit of {settings.MAX_FILE_SIZE // (1024*1024)} MB.')
-                    show_upload_modal = True
-                else:
-                    file_bytes = upload.read()
-                    encrypted_bytes = encrypt_file(file_bytes)
-                    file_obj = file_form.save(commit=False)
-                    file_obj.owner = request.user
-                    file_obj.name = upload.name
-                    file_obj.size = len(encrypted_bytes)
-                    if folder:
-                        file_obj.folder = folder
-                    usage = sum(f.size for f in File.objects.filter(owner=request.user))
-                    if usage + file_obj.size > settings.TOTAL_SERVER_STORAGE * 0.02:
-                        messages.error(request, 'Storage quota exceeded.')
-                        show_upload_modal = True
-                    else:
-                        def sanitize_filename(name):
-                            name = re.sub(r'[^\w\-. ]', '_', name)
-                            return name[:100]
-                        safe_name = sanitize_filename(upload.name)
-                        user_folder = f'user_{request.user.id}'
-                        folder_part = f'folder_{folder.id}' if folder else 'root'
-                        file_path = f'files/{user_folder}/{folder_part}/{safe_name}'
-                        abs_path = os.path.join(settings.MEDIA_ROOT, file_path)
-                        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                        base, ext = os.path.splitext(safe_name)
-                        counter = 1
-                        unique_path = abs_path
-                        unique_file_path = file_path
-                        while os.path.exists(unique_path):
-                            safe_name = f"{base}_{counter}{ext}"
-                            unique_file_path = f'files/{user_folder}/{folder_part}/{safe_name}'
-                            unique_path = os.path.join(settings.MEDIA_ROOT, unique_file_path)
-                            counter += 1
-                        with open(unique_path, 'wb') as f:
-                            f.write(encrypted_bytes)
-                        file_obj.file.name = unique_file_path
-                        file_obj.save()
-                        messages.success(request, 'File uploaded and encrypted successfully.')
-                        return redirect(request.get_full_path())
+                    return JsonResponse({'status': 'error', 'message': f'File size exceeds the limit of {settings.MAX_FILE_SIZE // (1024*1024)} MB.'})
+                file_bytes = upload.read()
+                encrypted_bytes = encrypt_file(file_bytes)
+                file_obj = file_form.save(commit=False)
+                file_obj.owner = request.user
+                file_obj.name = upload.name
+                file_obj.size = len(encrypted_bytes)
+                if folder:
+                    file_obj.folder = folder
+                usage = get_user_storage_usage(request.user)
+                if usage + file_obj.size > settings.USER_STORAGE_QUOTA:
+                    return JsonResponse({'status': 'error', 'message': 'Storage quota exceeded.'})
+                def sanitize_filename(name):
+                    name = re.sub(r'[\w\-. ]', '_', name)
+                    return name[:100]
+                safe_name = sanitize_filename(upload.name)
+                user_folder = f'user_{request.user.id}'
+                folder_part = f'folder_{folder.id}' if folder else 'root'
+                file_path = f'files/{user_folder}/{folder_part}/{safe_name}'
+                abs_path = os.path.join(settings.MEDIA_ROOT, file_path)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                base, ext = os.path.splitext(safe_name)
+                counter = 1
+                unique_path = abs_path
+                unique_file_path = file_path
+                while os.path.exists(unique_path):
+                    safe_name = f"{base}_{counter}{ext}"
+                    unique_file_path = f'files/{user_folder}/{folder_part}/{safe_name}'
+                    unique_path = os.path.join(settings.MEDIA_ROOT, unique_file_path)
+                    counter += 1
+                with open(unique_path, 'wb') as f:
+                    f.write(encrypted_bytes)
+                with open(unique_path, 'rb') as f:
+                    file_obj.file.save(safe_name, DjangoFile(f), save=False)
+                file_obj.save()
+                return JsonResponse({'status': 'success', 'message': 'File uploaded and encrypted successfully.'})
             else:
-                show_upload_modal = True
+                return JsonResponse({'status': 'error', 'message': 'Invalid form.'})
         elif 'create_folder' in request.POST:
             folder_form = FolderCreateForm(request.POST)
             if folder_form.is_valid():
@@ -117,7 +213,8 @@ def drive_view(request):
                 messages.success(request, 'Folder created successfully.')
                 return redirect(request.get_full_path())
             else:
-                show_folder_modal = True
+                context['show_folder_modal'] = True
+            context['folder_form'] = folder_form
         elif 'rename' in request.POST:
             rename_form = RenameForm(request.POST)
             target_type = request.POST.get('target_type')
@@ -133,8 +230,8 @@ def drive_view(request):
                     messages.success(request, 'Renamed successfully.')
                     return redirect(request.get_full_path())
                 else:
-                    show_rename_modal = True
-                    rename_target = target
+                    context['show_rename_modal'] = True
+                    context['rename_target'] = target
             else:
                 messages.error(request, 'Permission denied.')
         elif 'move' in request.POST:
@@ -156,8 +253,8 @@ def drive_view(request):
                     messages.success(request, 'Moved successfully.')
                     return redirect(request.get_full_path())
                 else:
-                    show_move_modal = True
-                    move_target = target
+                    context['show_move_modal'] = True
+                    context['move_target'] = target
             else:
                 messages.error(request, 'Permission denied.')
         elif 'remove' in request.POST:
@@ -172,7 +269,6 @@ def drive_view(request):
                     target.file.delete()
                     target.delete()
                 else:
-                    # Delete all subfolders/files recursively
                     def delete_folder(folder):
                         for f in folder.files.all():
                             f.file.delete()
@@ -185,106 +281,103 @@ def drive_view(request):
                 return redirect(request.get_full_path())
             else:
                 messages.error(request, 'Permission denied.')
-                show_remove_modal = True
-                remove_target = target
+                context['show_remove_modal'] = True
+                context['remove_target'] = target
+        return render(request, self.template_name, context)
 
-    return render(request, 'storage/drive.html', {
-        'folders': folders,
-        'files': files,
-        'current_folder': folder,
-        'breadcrumbs': breadcrumbs,
-        'view_mode': view_mode,
-        'file_form': file_form,
-        'folder_form': folder_form,
-        'show_upload_modal': show_upload_modal,
-        'show_folder_modal': show_folder_modal,
-        'rename_form': rename_form,
-        'move_form': move_form,
-        'show_rename_modal': show_rename_modal,
-        'show_move_modal': show_move_modal,
-        'show_remove_modal': show_remove_modal,
-        'rename_target': rename_target,
-        'move_target': move_target,
-        'remove_target': remove_target,
-    })
-
-@login_required
-def folder_view(request, folder_id):
-    folder = get_object_or_404(Folder, id=folder_id)
-    if folder.owner != request.user and not Permission.objects.filter(folder=folder, user=request.user).exists():
-        raise Http404()
-    subfolders = folder.subfolders.all()
-    files = folder.files.all()
-    return render(request, 'storage/folder.html', {'folder': folder, 'subfolders': subfolders, 'files': files})
-
-@login_required
-def upload_file(request):
-    if request.method == 'POST':
-        form = FileUploadForm(request.POST, request.FILES)
-        if form.is_valid():
-            file_obj = form.save(commit=False)
-            file_obj.owner = request.user
-            file_obj.size = file_obj.file.size
-            usage = get_user_storage_usage(request.user)
-            if usage + file_obj.size > settings.TOTAL_SERVER_STORAGE * 0.02:
-                messages.error(request, 'Storage quota exceeded.')
-            else:
-                file_obj.save()
-                messages.success(request, 'File uploaded successfully.')
+class DownloadFileView(LoginRequiredMixin, View):
+    def get(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        user = request.user
+        is_owner = file.owner == user or user.is_superuser
+        is_shared = Permission.objects.filter(file=file, user=user).exists()
+        if not (is_owner or is_shared or file.visibility == 'public'):
+            if file.visibility == 'ask':
+                messages.error(request, 'You must request access to this file.')
                 return redirect('drive')
-    else:
-        form = FileUploadForm()
-    return render(request, 'storage/upload.html', {'form': form})
+            raise Http404()
+        file_path = file.file.path
+        if not os.path.exists(file_path):
+            raise Http404()
+        with open(file_path, 'rb') as f:
+            encrypted_bytes = f.read()
+            decrypted_bytes = decrypt_file(encrypted_bytes)
+            if decrypted_bytes is None:
+                raise Http404('File decryption failed.')
+            response = HttpResponse(decrypted_bytes, content_type='application/octet-stream')
+            response['Content-Disposition'] = f'attachment; filename="{file.name}"'
+            return response
 
-@login_required
-def create_folder(request):
-    if request.method == 'POST':
-        form = FolderCreateForm(request.POST)
-        if form.is_valid():
-            folder = form.save(commit=False)
-            folder.owner = request.user
-            folder.save()
-            messages.success(request, 'Folder created successfully.')
+class ViewFileView(LoginRequiredMixin, View):
+    template_name = 'storage/view_text_file.html'
+    def get(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        user = request.user
+        is_owner = file.owner == user or user.is_superuser
+        is_shared = Permission.objects.filter(file=file, user=user).exists()
+        if not (is_owner or is_shared or file.visibility == 'public'):
+            if file.visibility == 'ask':
+                messages.error(request, 'You must request access to this file.')
+                return redirect('drive')
+            raise Http404()
+        file_path = file.file.path
+        if not os.path.exists(file_path):
+            raise Http404()
+        ext = os.path.splitext(file.name)[1].lower()
+        text_exts = ['.txt', '.csv', '.md', '.py', '.json', '.log']
+        with open(file_path, 'rb') as f:
+            encrypted_bytes = f.read()
+            decrypted_bytes = decrypt_file(encrypted_bytes)
+            if decrypted_bytes is None:
+                raise Http404('File decryption failed.')
+            if ext in text_exts:
+                text = decrypted_bytes.decode(errors='replace')
+                return render(request, self.template_name, {'file': file, 'text': text})
+            else:
+                mime, _ = mimetypes.guess_type(file.name)
+                response = HttpResponse(decrypted_bytes, content_type=mime or 'application/octet-stream')
+                response['Content-Disposition'] = f'inline; filename="{file.name}"'
+                return response
+    def post(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        user = request.user
+        is_owner = file.owner == user or user.is_superuser
+        is_shared = Permission.objects.filter(file=file, user=user).exists()
+        if not (is_owner or is_shared or file.visibility == 'public'):
+            if file.visibility == 'ask':
+                messages.error(request, 'You must request access to this file.')
+                return redirect('drive')
+            raise Http404()
+        file_path = file.file.path
+        if not os.path.exists(file_path):
+            raise Http404()
+        ext = os.path.splitext(file.name)[1].lower()
+        text_exts = ['.txt', '.csv', '.md', '.py', '.json', '.log']
+        if ext in text_exts:
+            new_text = request.POST.get('file_content', '')
+            new_encrypted = encrypt_file(new_text.encode())
+            with open(file_path, 'wb') as wf:
+                wf.write(new_encrypted)
+            file.size = len(new_encrypted)
+            file.save()
+            messages.success(request, 'File saved.')
+            return redirect('view_file', file_id=file.id)
+        else:
+            return self.get(request, file_id)
+
+class ShareFileView(LoginRequiredMixin, View):
+    template_name = 'storage/share_file.html'
+    def get(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        if file.owner != request.user:
+            messages.error(request, 'Only the owner can share this file.')
             return redirect('drive')
-    else:
-        form = FolderCreateForm()
-    return render(request, 'storage/create_folder.html', {'form': form})
-
-@login_required
-def delete_file(request, file_id):
-    file = get_object_or_404(File, id=file_id)
-    if file.owner == request.user or request.user.is_superuser:
-        file.file.delete()
-        file.delete()
-        messages.success(request, 'File deleted.')
-    else:
-        messages.error(request, 'Permission denied.')
-    return redirect('drive')
-
-@login_required
-def download_file(request, file_id):
-    file = get_object_or_404(File, id=file_id)
-    if file.owner != request.user and not Permission.objects.filter(file=file, user=request.user).exists() and not request.user.is_superuser:
-        raise Http404()
-    file_path = file.file.path
-    if not os.path.exists(file_path):
-        raise Http404()
-    with open(file_path, 'rb') as f:
-        encrypted_bytes = f.read()
-        decrypted_bytes = decrypt_file(encrypted_bytes)
-        if decrypted_bytes is None:
-            raise Http404('File decryption failed.')
-        response = HttpResponse(decrypted_bytes, content_type='application/octet-stream')
-        response['Content-Disposition'] = f'attachment; filename="{file.name}"'
-        return response
-
-@login_required
-def share_file(request, file_id):
-    file = get_object_or_404(File, id=file_id)
-    if file.owner != request.user:
-        messages.error(request, 'Only the owner can share this file.')
-        return redirect('drive')
-    if request.method == 'POST':
+        return render(request, self.template_name, {'file': file})
+    def post(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        if file.owner != request.user:
+            messages.error(request, 'Only the owner can share this file.')
+            return redirect('drive')
         username = request.POST.get('username')
         access_level = request.POST.get('access_level')
         user = User.objects.filter(username=username).first()
@@ -293,70 +386,306 @@ def share_file(request, file_id):
             messages.success(request, f'File shared with {username}.')
         else:
             messages.error(request, 'User not found.')
-    return render(request, 'storage/share_file.html', {'file': file})
+        return render(request, self.template_name, {'file': file})
 
-@login_required
-def request_access(request, file_id):
-    file = get_object_or_404(File, id=file_id)
-    owner = file.owner
-    # In a real app, send notification/email. Here, just show a message.
-    messages.info(request, f'Access request sent to {owner.username}.')
-    return redirect('drive')
+class RequestAccessView(LoginRequiredMixin, View):
+    def post(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        owner = file.owner
+        messages.info(request, f'Access request sent to {owner.username}.')
+        return redirect('drive')
 
-@login_required
-def accept_access(request, permission_id):
-    perm = get_object_or_404(Permission, id=permission_id)
-    if perm.file and perm.file.owner == request.user:
-        perm.access_level = 'read'  # or 'write', as needed
-        perm.save()
-        messages.success(request, 'Access granted.')
-    else:
-        messages.error(request, 'Permission denied.')
-    return redirect('drive')
-
-@user_passes_test(is_superuser)
-def superuser_dashboard(request):
-    users = User.objects.all()
-    return render(request, 'storage/superuser_dashboard.html', {'users': users})
-
-@user_passes_test(is_superuser)
-def superuser_user_files(request, user_id):
-    user = get_object_or_404(User, id=user_id)
-    files = File.objects.filter(owner=user)
-    folders = Folder.objects.filter(owner=user)
-    return render(request, 'storage/superuser_user_files.html', {'user': user, 'files': files, 'folders': folders})
-
-@login_required
-def view_file(request, file_id):
-    file = get_object_or_404(File, id=file_id)
-    if file.owner != request.user and not Permission.objects.filter(file=file, user=request.user).exists() and not request.user.is_superuser:
-        raise Http404()
-    file_path = file.file.path
-    if not os.path.exists(file_path):
-        raise Http404()
-    ext = os.path.splitext(file.name)[1].lower()
-    text_exts = ['.txt', '.csv', '.md', '.py', '.json', '.log']
-    with open(file_path, 'rb') as f:
-        encrypted_bytes = f.read()
-        decrypted_bytes = decrypt_file(encrypted_bytes)
-        if decrypted_bytes is None:
-            raise Http404('File decryption failed.')
-        if ext in text_exts:
-            text = decrypted_bytes.decode(errors='replace')
-            if request.method == 'POST':
-                new_text = request.POST.get('file_content', '')
-                # Save new content (re-encrypt and overwrite file)
-                new_encrypted = encrypt_file(new_text.encode())
-                with open(file_path, 'wb') as wf:
-                    wf.write(new_encrypted)
-                file.size = len(new_encrypted)
-                file.save()
-                messages.success(request, 'File saved.')
-                return redirect('view_file', file_id=file.id)
-            return render(request, 'storage/view_text_file.html', {'file': file, 'text': text})
+class AcceptAccessView(LoginRequiredMixin, View):
+    def post(self, request, permission_id):
+        perm = get_object_or_404(Permission, id=permission_id)
+        if perm.file and perm.file.owner == request.user:
+            perm.access_level = 'read'
+            perm.save()
+            messages.success(request, 'Access granted.')
         else:
-            # For media, stream the file for browser preview
-            mime, _ = mimetypes.guess_type(file.name)
-            response = HttpResponse(decrypted_bytes, content_type=mime or 'application/octet-stream')
-            response['Content-Disposition'] = f'inline; filename="{file.name}"'
-            return response
+            messages.error(request, 'Permission denied.')
+        return redirect('drive')
+
+class SuperuserDashboardView(IsSuperuserMixin, TemplateView):
+    template_name = 'storage/superuser_dashboard.html'
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['users'] = User.objects.all()
+        return context
+
+class SuperuserUserFilesView(IsSuperuserMixin, TemplateView):
+    template_name = 'storage/superuser_user_files.html'
+    def get_context_data(self, **kwargs):
+        user = get_object_or_404(User, id=self.kwargs['user_id'])
+        context = super().get_context_data(**kwargs)
+        context['user'] = user
+        context['files'] = File.objects.filter(owner=user)
+        context['folders'] = Folder.objects.filter(owner=user)
+        return context
+
+class RequestAccessToFileView(LoginRequiredMixin, View):
+    def post(self, request, file_id):
+        file = get_object_or_404(File, id=file_id)
+        user = request.user
+        if file.owner == user or Permission.objects.filter(file=file, user=user).exists():
+            messages.info(request, 'You already have access.')
+        else:
+            ar, created = AccessRequest.objects.get_or_create(user=user, file=file)
+            if created:
+                messages.success(request, 'Access request sent.')
+            else:
+                messages.info(request, 'You have already requested access.')
+        return redirect('drive')
+
+class RequestAccessToFolderView(LoginRequiredMixin, View):
+    def post(self, request, folder_id):
+        folder = get_object_or_404(Folder, id=folder_id)
+        user = request.user
+        if folder.owner == user or Permission.objects.filter(folder=folder, user=user).exists():
+            messages.info(request, 'You already have access.')
+        else:
+            ar, created = AccessRequest.objects.get_or_create(user=user, folder=folder)
+            if created:
+                messages.success(request, 'Access request sent.')
+            else:
+                messages.info(request, 'You have already requested access.')
+        return redirect('drive')
+
+class OwnerAccessRequestsView(LoginRequiredMixin, View):
+    template_name = 'storage/access_requests.html'
+    def get(self, request):
+        user = request.user
+        # All requests for files/folders owned by this user
+        file_requests = AccessRequest.objects.filter(file__owner=user, status='pending')
+        folder_requests = AccessRequest.objects.filter(folder__owner=user, status='pending')
+        return render(request, self.template_name, {'file_requests': file_requests, 'folder_requests': folder_requests})
+
+class ApproveAccessRequestView(LoginRequiredMixin, View):
+    def post(self, request, request_id):
+        ar = get_object_or_404(AccessRequest, id=request_id)
+        if (ar.file and ar.file.owner == request.user) or (ar.folder and ar.folder.owner == request.user):
+            ar.status = 'approved'
+            ar.save()
+            # Grant permission
+            if ar.file:
+                Permission.objects.get_or_create(user=ar.user, file=ar.file, defaults={'access_level': 'read'})
+            if ar.folder:
+                Permission.objects.get_or_create(user=ar.user, folder=ar.folder, defaults={'access_level': 'read'})
+            messages.success(request, 'Access granted.')
+        else:
+            messages.error(request, 'Permission denied.')
+        return redirect('owner_access_requests')
+
+class RejectAccessRequestView(LoginRequiredMixin, View):
+    def post(self, request, request_id):
+        ar = get_object_or_404(AccessRequest, id=request_id)
+        if (ar.file and ar.file.owner == request.user) or (ar.folder and ar.folder.owner == request.user):
+            ar.status = 'rejected'
+            ar.save()
+            messages.info(request, 'Access request rejected.')
+        else:
+            messages.error(request, 'Permission denied.')
+        return redirect('owner_access_requests')
+
+class ShareLinkFileView(View):
+    def get(self, request, token):
+        file = get_object_or_404(File, share_token=token)
+        user = request.user if request.user.is_authenticated else None
+        is_owner = user and (file.owner == user or user.is_superuser)
+        is_shared = user and Permission.objects.filter(file=file, user=user).exists()
+        can_view = file.visibility == 'public' or is_owner or is_shared
+        # If not accessible
+        if not can_view:
+            if file.visibility == 'ask':
+                # If not logged in, prompt login
+                if not user:
+                    return render(request, 'storage/drive.html', {
+                        'folders': [],
+                        'files': [],
+                        'current_folder': None,
+                        'breadcrumbs': [],
+                        'view_mode': 'list',
+                        'file_form': FileUploadForm(),
+                        'folder_form': FolderCreateForm(),
+                        'rename_form': RenameForm(),
+                        'move_form': None,
+                        'show_upload_modal': False,
+                        'show_folder_modal': False,
+                        'show_rename_modal': False,
+                        'show_move_modal': False,
+                        'show_remove_modal': False,
+                        'rename_target': None,
+                        'move_target': None,
+                        'remove_target': None,
+                        'shared_file': None,
+                        'share_banner': "<a href='/accounts/login/'>Log in</a> to request access to this file.",
+                    })
+                # Show request access form
+                return render(request, 'storage/share_file.html', {'file': file, 'show_request_access': True})
+            # Not public, not shared, not owner
+            banner = "This file is not public. "
+            if not user:
+                banner += "<a href='/accounts/login/'>Log in</a> to see if you have access."
+            else:
+                banner += "You do not have access to this file."
+            return render(request, 'storage/drive.html', {
+                'folders': [],
+                'files': [],
+                'current_folder': None,
+                'breadcrumbs': [],
+                'view_mode': 'list',
+                'file_form': FileUploadForm(),
+                'folder_form': FolderCreateForm(),
+                'rename_form': RenameForm(),
+                'move_form': None,
+                'show_upload_modal': False,
+                'show_folder_modal': False,
+                'show_rename_modal': False,
+                'show_move_modal': False,
+                'show_remove_modal': False,
+                'rename_target': None,
+                'move_target': None,
+                'remove_target': None,
+                'shared_file': None,
+                'share_banner': banner,
+            })
+        # If accessible, show in drive view with banner if not owner
+        folder = file.folder
+        breadcrumbs = get_breadcrumbs(folder) if folder else []
+        share_banner = None
+        if not is_owner:
+            if user:
+                share_banner = f"Shared by {file.owner.username}"
+            else:
+                share_banner = f"This file is shared by {file.owner.username}. <a href='/accounts/login/'>Log in</a> for more features."
+        context = {
+            'folders': [],
+            'files': [file],
+            'current_folder': folder,
+            'breadcrumbs': breadcrumbs,
+            'view_mode': 'list',
+            'file_form': FileUploadForm(),
+            'folder_form': FolderCreateForm(),
+            'rename_form': RenameForm(),
+            'move_form': MoveForm(user=user) if user else None,
+            'show_upload_modal': False,
+            'show_folder_modal': False,
+            'show_rename_modal': False,
+            'show_move_modal': False,
+            'show_remove_modal': False,
+            'rename_target': None,
+            'move_target': None,
+            'remove_target': None,
+            'shared_file': file,
+            'share_banner': share_banner,
+        }
+        return render(request, 'storage/drive.html', context)
+
+class ShareLinkFolderView(View):
+    def get(self, request, token):
+        folder = get_object_or_404(Folder, share_token=token)
+        user = request.user if request.user.is_authenticated else None
+        is_owner = user and (folder.owner == user or user.is_superuser)
+        is_shared = user and Permission.objects.filter(folder=folder, user=user).exists()
+        if folder.visibility == 'public' or is_owner or is_shared:
+            files = folder.files.filter(visibility__in=['public', 'ask'])
+            subfolders = folder.subfolders.filter(visibility__in=['public', 'ask'])
+            return render(request, 'storage/drive.html', {
+                'folders': subfolders,
+                'files': files,
+                'current_folder': folder,
+                'breadcrumbs': get_breadcrumbs(folder),
+                'view_mode': 'list',
+                'file_form': FileUploadForm(),
+                'folder_form': FolderCreateForm(),
+                'rename_form': RenameForm(),
+                'move_form': MoveForm(user=user) if user else None,
+                'show_upload_modal': False,
+                'show_folder_modal': False,
+                'show_rename_modal': False,
+                'show_move_modal': False,
+                'show_remove_modal': False,
+                'rename_target': None,
+                'move_target': None,
+                'remove_target': None,
+            })
+        elif folder.visibility == 'ask':
+            return render(request, 'storage/share_file.html', {'folder': folder, 'show_request_access': True})
+        else:
+            raise Http404()
+
+# --- AJAX endpoints for sharing modal ---
+class ShareInfoView(LoginRequiredMixin, View):
+    def get(self, request, type, id):
+        user = request.user
+        if type == 'file':
+            obj = get_object_or_404(File, id=id)
+            share_link = request.build_absolute_uri(reverse('share_link_file', args=[obj.share_token]))
+            shared_users = list(Permission.objects.filter(file=obj).values('user__username', 'access_level'))
+        else:
+            obj = get_object_or_404(Folder, id=id)
+            share_link = request.build_absolute_uri(reverse('share_link_folder', args=[obj.share_token]))
+            shared_users = list(Permission.objects.filter(folder=obj).values('user__username', 'access_level'))
+        is_owner = obj.owner == user or user.is_superuser
+        return JsonResponse({
+            'name': obj.name,
+            'share_link': share_link,
+            'visibility': obj.visibility,
+            'is_owner': is_owner,
+            'shared_users': shared_users,
+        })
+
+@method_decorator(require_POST, name='dispatch')
+class ShareUpdateView(LoginRequiredMixin, View):
+    def post(self, request, type, id):
+        user = request.user
+        visibility = request.POST.get('visibility')
+        if type == 'file':
+            obj = get_object_or_404(File, id=id)
+        else:
+            obj = get_object_or_404(Folder, id=id)
+        if obj.owner != user and not user.is_superuser:
+            return JsonResponse({'status': 'error', 'message': 'Permission denied.'}, status=403)
+        if visibility in ['public', 'private', 'ask']:
+            obj.visibility = visibility
+            obj.save()
+            return JsonResponse({'status': 'success', 'visibility': obj.visibility})
+        return JsonResponse({'status': 'error', 'message': 'Invalid visibility.'}, status=400)
+
+@method_decorator(require_POST, name='dispatch')
+class ShareAddUserView(LoginRequiredMixin, View):
+    def post(self, request, type, id):
+        user = request.user
+        username = request.POST.get('username')
+        access_level = request.POST.get('access_level', 'read')
+        target_user = User.objects.filter(username=username).first()
+        if not target_user:
+            return JsonResponse({'status': 'error', 'message': 'User not found.'}, status=404)
+        if type == 'file':
+            obj = get_object_or_404(File, id=id)
+            perm, created = Permission.objects.update_or_create(user=target_user, file=obj, defaults={'access_level': access_level})
+        else:
+            obj = get_object_or_404(Folder, id=id)
+            perm, created = Permission.objects.update_or_create(user=target_user, folder=obj, defaults={'access_level': access_level})
+        if obj.owner != user and not user.is_superuser:
+            return JsonResponse({'status': 'error', 'message': 'Permission denied.'}, status=403)
+        return JsonResponse({'status': 'success', 'user': username, 'access_level': access_level})
+
+@method_decorator(require_POST, name='dispatch')
+class ShareRemoveUserView(LoginRequiredMixin, View):
+    def post(self, request, type, id):
+        user = request.user
+        username = request.POST.get('username')
+        target_user = User.objects.filter(username=username).first()
+        if not target_user:
+            return JsonResponse({'status': 'error', 'message': 'User not found.'}, status=404)
+        if type == 'file':
+            obj = get_object_or_404(File, id=id)
+            perm = Permission.objects.filter(user=target_user, file=obj)
+        else:
+            obj = get_object_or_404(Folder, id=id)
+            perm = Permission.objects.filter(user=target_user, folder=obj)
+        if obj.owner != user and not user.is_superuser:
+            return JsonResponse({'status': 'error', 'message': 'Permission denied.'}, status=403)
+        perm.delete()
+        return JsonResponse({'status': 'success', 'user': username})

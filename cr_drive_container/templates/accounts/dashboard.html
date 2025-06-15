@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container mt-5">
+  <h2>Dashboard</h2>
+  <div class="row mt-4">
+    <div class="col-md-6">
+      <div class="card mb-3">
+        <div class="card-body">
+          <h5 class="card-title">👤 Profile</h5>
+          <p class="card-text mb-1"><strong>Username:</strong> {{ user.username }}</p>
+          <p class="card-text mb-1"><strong>Email:</strong> {{ user.email }}</p>
+          <!-- Add more profile fields here -->
+        </div>
+      </div>
+      <div class="card mb-3">
+        <div class="card-body">
+          <h5 class="card-title">📊 Storage Usage</h5>
+          <p class="card-text mb-1"><strong>Used:</strong> {{ user.files.all|length }} files</p>
+          <div class="progress mb-2" style="height: 20px;">
+            <div class="progress-bar bg-info" role="progressbar" style="width: {{ usage_percent|default:0 }}%;" aria-valuenow="{{ usage_percent|default:0 }}" aria-valuemin="0" aria-valuemax="100">{{ usage_percent|default:0 }}%</div>
+          </div>
+          <small class="text-muted">{{ usage|default:0 }} bytes used of {{ quota|default:0 }} bytes</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">📁 My Drive</h5>
+          <a href="{% url 'drive' %}" class="btn btn-primary">Go to Drive</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} 

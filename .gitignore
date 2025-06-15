@@ -1,0 +1,18 @@
+env/
+.env
+
+# Django
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+
+# Python
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+__pycache__/

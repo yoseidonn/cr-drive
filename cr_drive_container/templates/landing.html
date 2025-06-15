@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="container text-center mt-5">
+  <h1>Welcome to CR Drive</h1>
+  <p class="lead">Secure Cloud Storage for Everyone</p>
+  <a href="{% url 'signup' %}" class="btn btn-primary m-2">Sign Up</a>
+  <a href="{% url 'login' %}" class="btn btn-outline-primary m-2">Log In</a>
+</div>
+{% endblock %} 

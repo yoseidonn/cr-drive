@@ -38,7 +38,32 @@ pip install -r requirements.txt
 ```
 
 ### 4. Configure Environment Variables
-- Copy `.env.example` to `.env` and fill in your secrets (Django secret key, database URL, etc).
+- Create a `.env` file inside the `cr_drive_container/` directory (next to `settings.py`).
+- The following variables are **required**:
+
+```
+SECRET_KEY=your-django-secret-key
+FILE_ENCRYPTION_KEY=your-fernet-key
+DATABASE_URL=postgres://user:password@localhost:5432/dbname
+DEBUG=True
+TOTAL_SERVER_STORAGE=10737418240  # 10 GB, in bytes
+```
+
+#### Generating a Fernet Encryption Key
+To generate a secure Fernet key for `FILE_ENCRYPTION_KEY`, run this in Python:
+
+```python
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+```
+
+Copy the output and paste it as the value for `FILE_ENCRYPTION_KEY` in your `.env` file.
+
+- `SECRET_KEY`: Django secret key (use `python manage.py shell -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"` to generate)
+- `FILE_ENCRYPTION_KEY`: Used for encrypting/decrypting all files (see above)
+- `DATABASE_URL`: PostgreSQL connection string
+- `DEBUG`: Set to `False` in production
+- `TOTAL_SERVER_STORAGE`: Total allowed storage for all users (in bytes)
 
 ### 5. Apply Migrations
 ```bash
